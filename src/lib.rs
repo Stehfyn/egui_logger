@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use egui::Color32;
+use egui::{Color32, Vec2};
 use log::SetLoggerError;
 
 use regex::{Regex, RegexBuilder};
@@ -27,6 +27,52 @@ impl log::Log for EguiLogger {
     }
 
     fn flush(&self) {}
+}
+
+pub struct LogColorMap {
+    trace: egui::Color32,
+    debug: egui::Color32,
+    info: egui::Color32,
+    warn: egui::Color32,
+    error: egui::Color32,
+}
+
+impl LogColorMap {
+    pub fn new(
+        trace: egui::Color32,
+        debug: egui::Color32,
+        info: egui::Color32,
+        warn: egui::Color32,
+        error: egui::Color32,
+    ) -> Self {
+        Self {
+            trace,
+            debug,
+            info,
+            warn,
+            error,
+        }
+    }
+
+    pub fn default() -> Self {
+        Self {
+            trace: egui::Color32::from_gray(180),       // Light Gray
+            debug: egui::Color32::from_rgb(0, 0, 255),  // Blue
+            info: egui::Color32::from_rgb(0, 255, 0),   // Green
+            warn: egui::Color32::from_rgb(255, 165, 0), // Orange
+            error: egui::Color32::from_rgb(255, 0, 0),  // Red
+        }
+    }
+
+    fn get_color(&self, level: &log::Level) -> egui::Color32 {
+        match level {
+            log::Level::Trace => self.trace,
+            log::Level::Debug => self.debug,
+            log::Level::Info => self.info,
+            log::Level::Warn => self.warn,
+            log::Level::Error => self.error,
+        }
+    }
 }
 
 /// Initilizes the global logger.
@@ -69,6 +115,21 @@ where
     }
 }
 
+struct MinLoggerUiStats {
+    content_size: Vec2,
+    scroll_offset: Vec2,
+    visible_size: Vec2,
+}
+
+impl Default for MinLoggerUiStats {
+    fn default() -> Self {
+        Self {
+            content_size: egui::Vec2::ZERO,
+            scroll_offset: egui::Vec2::ZERO,
+            visible_size: egui::Vec2::ZERO,
+        }
+    }
+}
 struct LoggerUi {
     loglevels: [bool; log::Level::Trace as usize],
     search_term: String,
@@ -76,6 +137,8 @@ struct LoggerUi {
     search_case_sensitive: bool,
     search_use_regex: bool,
     max_log_length: usize,
+    min_logger_ui_stats: MinLoggerUiStats,
+    log_color_map: LogColorMap,
 }
 
 impl Default for LoggerUi {
@@ -87,11 +150,53 @@ impl Default for LoggerUi {
             regex: None,
             search_use_regex: false,
             max_log_length: 1000,
+            min_logger_ui_stats: MinLoggerUiStats::default(),
+            log_color_map: LogColorMap::default(),
         }
     }
 }
 
 impl LoggerUi {
+    pub fn set_log_color_map(&mut self, log_color_map: LogColorMap) {
+        self.log_color_map = log_color_map;
+    }
+
+    pub fn minimal_ui(&mut self, ui: &mut egui::Ui, bg_col: egui::Color32) {
+        let mut logs_displayed: usize = 0;
+
+        let scroll_area = egui::ScrollArea::vertical()
+            .auto_shrink([false, true])
+            .max_height(ui.available_height() - 30.0)
+            .stick_to_bottom(true)
+            .drag_to_scroll(false)
+            .show(ui, |ui| {
+                try_get_log(|logs| {
+                    let mut rect = ui.available_rect_before_wrap();
+                    rect.min.y += self.min_logger_ui_stats.scroll_offset.y;
+                    rect.max.y += self.min_logger_ui_stats.scroll_offset.y;
+                    let painter = egui::Painter::new(ui.ctx().clone(), ui.layer_id(), rect);
+                    painter.rect_filled(rect, egui::Rounding::default(), bg_col);
+                    ui.expand_to_include_rect(painter.clip_rect());
+                    logs.iter().for_each(|(level, string)| {
+                        if (!self.search_term.is_empty() && !self.match_string(string))
+                            || !(self.loglevels[*level as usize - 1])
+                        {
+                            return;
+                        }
+
+                        let string_format = format!("[{}]: {}", level, string);
+                        ui.colored_label(self.log_color_map.get_color(level), string_format);
+                        logs_displayed += 1;
+                    });
+                });
+            });
+        self.min_logger_ui_stats.content_size = scroll_area.content_size;
+        self.min_logger_ui_stats.scroll_offset = scroll_area.state.offset;
+        self.min_logger_ui_stats.visible_size = egui::Vec2 {
+            x: scroll_area.inner_rect.width(),
+            y: scroll_area.inner_rect.height(),
+        };
+    }
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         try_mut_log(|logs| {
             let dropped_entries = logs.len().saturating_sub(self.max_log_length);
@@ -234,7 +339,19 @@ impl LoggerUi {
 pub fn logger_ui(ui: &mut egui::Ui) {
     if let Ok(ref mut logger_ui) = LOGGER_UI.lock() {
         logger_ui.ui(ui);
-    } else { 
+    } else {
         ui.colored_label(Color32::RED, "Something went wrong loading the log");
+    }
+}
+pub fn minimal_logger_ui(ui: &mut egui::Ui, bg_col: egui::Color32) {
+    if let Ok(ref mut logger_ui) = LOGGER_UI.lock() {
+        logger_ui.minimal_ui(ui, bg_col);
+    } else {
+        ui.colored_label(Color32::RED, "Something went wrong loading the log");
+    }
+}
+pub fn set_log_color_map(log_color_map: LogColorMap) {
+    if let Ok(ref mut logger_ui) = LOGGER_UI.lock() {
+        logger_ui.set_log_color_map(log_color_map);
     }
 }
